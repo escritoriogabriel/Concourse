@@ -77,6 +77,17 @@ class SecurityAndValidationTests(unittest.TestCase):
         self.assertIn("x.status!=='concluido'", javascript)
         self.assertIn('data-action="open-import"', html)
 
+    def test_events_are_rendered_only_on_their_start_date(self):
+        javascript = client.get('/static/app.js').text
+        self.assertIn('e.start_date===day', javascript)
+        self.assertIn("x.start_date===date", javascript)
+        self.assertIn('prazos administrativos', javascript)
+
+    def test_reset_clears_browser_backup_before_refresh(self):
+        javascript = client.get('/static/app.js').text
+        self.assertIn("localStorage.removeItem(BROWSER_BACKUP_KEY)", javascript)
+        self.assertIn("state.calendarDay=null", javascript)
+
     def test_storage_status_and_full_backup_restore(self):
         client.post('/api/sessions', json={'day': '2026-11-04', 'subject_id': 'portugues', 'minutes': 50})
         status = client.get('/api/storage/status')
