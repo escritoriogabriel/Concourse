@@ -1,0 +1,11 @@
+data/*.db
+data/uploads/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+*.py[cod]
+.DS_Store

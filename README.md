@@ -49,9 +49,15 @@ O EditalOS considera que o usuário possui sua própria assinatura. Para as sess
 
 O aplicativo funciona localmente e não precisa de API, chave, Ollama ou conexão com NotebookLM para executar. A conexão com o NotebookLM é feita pelo usuário, pelo navegador, por meio do arquivo JSON baixado.
 
+## Segurança e dados locais
+
+Esta distribuição é local e single-user: mantenha o servidor em `127.0.0.1`. Não use `--host 0.0.0.0` nem publique a porta sem implementar autenticação, autorização, CSRF, rate limiting e isolamento por usuário. O banco e os uploads não fazem parte do Git; consulte `docs/SECURITY.md` e `docs/BACKUP.md` para operação segura.
+
+Para criar uma base fictícia de demonstração, execute `python scripts/seed_demo.py`. Para desenvolvimento, instale também `requirements-dev.txt` e execute a suíte de testes e o lint conforme `CONTRIBUTING.md`.
+
 ## Dados e atualização
 
-Os dados ficam em `data/editalos.db`, e PDFs antigos, quando existentes, ficam em `data/uploads`. A inicialização da versão atual faz migrações aditivas no SQLite para acrescentar campos de instituição, origem de eventos e metadados das sessões, sem apagar os registros anteriores.
+Os dados ficam em `data/editalos.db`, e PDFs antigos, quando existentes, ficam em `data/uploads`. Esses arquivos são locais e ignorados pelo Git. A inicialização da versão atual faz migrações aditivas no SQLite para acrescentar campos de instituição, rastreabilidade de importação e metadados das sessões, sem apagar os registros anteriores.
 
 Antes de substituir arquivos de uma instalação existente, feche o EditalOS e copie a pasta `data` para um local seguro. Para instalar em outra pasta, execute `MIGRAR_DADOS_ANTERIORES_WINDOWS.bat` e informe o caminho da pasta da instalação anterior. O migrador não altera a origem e não sobrescreve um diretório de destino que já contenha dados.
 
@@ -68,5 +74,7 @@ Os testes de integração desta versão cobrem importação JSON, validação de
 ```bat
 python -m unittest discover -s tests -v
 ```
+
+O CI também executa pytest, compilação Python, verificação de sintaxe JavaScript e Ruff. As prévias NotebookLM têm TTL, confirmação de uso único, rastreabilidade por importação e resumo dos itens que serão removidos em uma substituição.
 
 A conferência do conteúdo e das datas no edital original continua sendo responsabilidade do usuário. O NotebookLM pode omitir ou interpretar incorretamente informações; a prévia do EditalOS existe para revisão antes da gravação.

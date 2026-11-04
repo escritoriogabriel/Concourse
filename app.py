@@ -9,6 +9,8 @@ import sqlite3
 import unicodedata
 import uuid
 import hashlib
+import threading
+import time
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -26,7 +28,10 @@ DB_PATH = DATA_DIR / 'editalos.db'
 STATIC = ROOT / 'static'
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title='EditalOS · Agenda NotebookLM', version='3.0.0')
+PREVIEW_TTL_SECONDS = 3600
+PREVIEW_MAX_ENTRIES = 32
 notebooklm_previews: dict[str, dict] = {}
+preview_lock = threading.Lock()
 
 SUBJECTS = [
  ('portugues', 'Língua Portuguesa', 'Linguagens'),
@@ -129,6 +134,8 @@ def init_db():
         for col in ('notes','source_reference'):
             if col not in event_columns:
                 c.execute("ALTER TABLE events ADD COLUMN " + col + " TEXT DEFAULT ''")
+        if 'notebooklm_import_id' not in event_columns:
+            c.execute("ALTER TABLE events ADD COLUMN notebooklm_import_id TEXT DEFAULT ''")
         existing_columns={row['name'] for row in c.execute('PRAGMA table_info(sessions)')}
         additions={
           'exam_id':'INTEGER', 'start_time':"TEXT DEFAULT ''", 'topic':"TEXT DEFAULT ''",
@@ -264,7 +271,7 @@ class SessionIn(BaseModel):
 class SettingIn(BaseModel):
     weekly_hours: int = Field(ge=1, le=84)
     buffer_pct: int = Field(ge=0, le=50)
-    strategy: str = 'equilibrado'
+    strategy: str = Field(default='equilibrado', pattern='^(equilibrado|proxima|desempenho|pesos)$')
     study_days: list[int] = [0,1,2,3,4,5]
     auto_review: bool = True
 
@@ -377,6 +384,11 @@ def patch_exam(exam_id:int, data:dict):
     fields={k:v for k,v in data.items() if k in allow}
     if not fields: raise HTTPException(422,'Sem dados válidos')
     if 'exam_date' in fields and fields['exam_date']: validate_date(fields['exam_date'])
+    for key in ('name','cargo','banca'):
+        if key in fields and not isinstance(fields[key], str):
+            raise HTTPException(422, f'{key} deve ser texto')
+        if key in fields and len(fields[key]) > 150:
+            raise HTTPException(422, f'{key} muito longo')
     with db() as c:
         if not c.execute('SELECT id FROM exams WHERE id=?',(exam_id,)).fetchone(): raise HTTPException(404)
         c.execute('UPDATE exams SET '+', '.join(f'{k}=?' for k in fields)+' WHERE id=?',list(fields.values())+[exam_id])
@@ -454,8 +466,10 @@ def mark_topic(p:TopicProgressUpdate):
 def create_event(p:EventIn):
     d1=validate_date(p.start_date);d2=validate_date(p.end_date)
     if d2<d1: raise HTTPException(422,'Fim do período anterior ao início')
-    if p.type not in {'inscricao','isencao','prova','pagamento','recurso','resultado','outro'}: raise HTTPException(422,'Tipo inválido')
+    if p.type not in {'inscricao','isencao','prova','pagamento','recurso','resultado','convocacao','taf','outro'}: raise HTTPException(422,'Tipo inválido')
     with db() as c:
+        if p.exam_id and not c.execute('SELECT id FROM exams WHERE id=?',(p.exam_id,)).fetchone():
+            raise HTTPException(404,'Concurso vinculado não encontrado')
         cur=c.execute('INSERT INTO events(exam_id,title,type,start_date,end_date,status,notes,source_reference,created) VALUES(?,?,?,?,?,?,?,?,?)',
                       (p.exam_id,p.title,p.type,p.start_date,p.end_date,p.status,p.notes,p.source_reference,now()))
         return {'ok':True,'id':cur.lastrowid}
@@ -463,7 +477,9 @@ def create_event(p:EventIn):
 @app.patch('/api/events/{event_id}')
 def event_update(event_id:int, data:dict):
     if data.get('status') not in ['pendente','concluido'] : raise HTTPException(422,'Status inválido')
-    with db() as c: c.execute('UPDATE events SET status=? WHERE id=?',(data['status'],event_id))
+    with db() as c:
+        if not c.execute('SELECT id FROM events WHERE id=?',(event_id,)).fetchone(): raise HTTPException(404,'Prazo não encontrado')
+        c.execute('UPDATE events SET status=? WHERE id=?',(data['status'],event_id))
     return {'ok':True}
 
 @app.post('/api/settings')
@@ -506,8 +522,13 @@ def allocate(c):
             if p and p['total']>=3:score[sid]*=(1+1.2*(1-p['right']/p['total']))
     if st.get('strategy')=='pesos':
         for sid in score:score[sid]**=1.3
-    # Round half-hours by largest remainder, with minimum 0.5 per included subject.
-    units=max(len(score),round(total*2)); total_units=units
+    # Round half-hours by largest remainder. If the available capacity is smaller
+    # than the number of subjects, prioritize instead of exceeding the weekly cap.
+    total_units=max(1,round(total*2))
+    if total_units < len(score):
+        score=dict(sorted(score.items(),key=lambda item:item[1],reverse=True)[:total_units])
+    units=total_units
+    total_units=units
     total_score=sum(score.values())
     shares={k:score[k]/total_score*total_units for k in score}
     allocations={k:1 for k in shares}
@@ -584,6 +605,10 @@ def restore_version(version_id:int):
 @app.post('/api/sessions')
 def add_session(p:SessionIn):
     validate_date(p.day)
+    if p.start_time and not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',p.start_time):
+        raise HTTPException(422,'Horário deve estar em HH:MM')
+    if p.activity_type not in {'estudo','teoria','questoes','revisao','simulado','lei_seca','resumo','redacao','outro'}:
+        raise HTTPException(422,'Tipo de atividade inválido')
     with db() as c:
         if not c.execute('SELECT id FROM subjects WHERE id=?',(p.subject_id,)).fetchone():raise HTTPException(422,'Matéria inválida')
         if p.exam_id and not c.execute('SELECT id FROM exams WHERE id=?',(p.exam_id,)).fetchone():
@@ -608,7 +633,9 @@ def schedule_week(req:StudySchedule):
     start=validate_date(req.start_day) if req.start_day else local_today()
     monday=start-timedelta(days=start.weekday())
     with db() as c:
-        plan=current(c)['allocations'];st=settings(c)
+        active_plan=current(c)
+        if not active_plan: raise HTTPException(422,'Gere ou importe um plano antes de criar a semana')
+        plan=active_plan['allocations'];st=settings(c)
         days=sorted(set(st['study_days']))
         if not days:raise HTTPException(422,'Nenhum dia de estudo')
         # Exclude exam days; do not silently cancel already completed sessions.
@@ -729,6 +756,7 @@ def submit_quiz(p:QuizSubmit):
 @app.patch('/api/reviews/{review_id}')
 def review_done(review_id:int):
     with db() as c:
+        if not c.execute('SELECT id FROM reviews WHERE id=?',(review_id,)).fetchone(): raise HTTPException(404,'Revisão não encontrada')
         c.execute("UPDATE reviews SET status='concluida' WHERE id=?",(review_id,))
     return {'ok':True}
 
@@ -966,6 +994,30 @@ def notebooklm_template():
     return FileResponse(STATIC/'modelo_notebooklm.json',media_type='application/json',filename='editalos_modelo_notebooklm.json')
 
 
+def cleanup_previews():
+    cutoff=time.monotonic()-PREVIEW_TTL_SECONDS
+    for key,item in list(notebooklm_previews.items()):
+        if item.get('created_monotonic',0)<cutoff:
+            notebooklm_previews.pop(key,None)
+
+
+def store_preview(token, item):
+    with preview_lock:
+        cleanup_previews()
+        while len(notebooklm_previews)>=PREVIEW_MAX_ENTRIES:
+            oldest=min(notebooklm_previews,key=lambda key:notebooklm_previews[key].get('created_monotonic',0))
+            notebooklm_previews.pop(oldest,None)
+        notebooklm_previews[token]=item
+
+
+def consume_preview(token):
+    with preview_lock:
+        cleanup_previews()
+        item=notebooklm_previews.pop(token,None)
+        if not item: raise HTTPException(410,'Prévia expirada. Envie o JSON novamente.')
+        return item
+
+
 @app.post('/api/notebooklm/preview')
 async def notebooklm_preview(file: UploadFile=File(...)):
     raw=await file.read(NOTEBOOKLM_MAX_BYTES+1)
@@ -986,15 +1038,28 @@ async def notebooklm_preview(file: UploadFile=File(...)):
         raise HTTPException(422,f'JSON inválido. Salve apenas o objeto JSON, sem texto fora dele. Detalhe: {str(e)[:150]}')
     plan=normalize_notebook_plan(data)
     token=uuid.uuid4().hex
-    notebooklm_previews[token]={'plan':plan,'filename':filename,'sha256':digest,'created':now()}
+    store_preview(token,{'plan':plan,'filename':filename,'sha256':digest,'created':now(),
+                         'created_monotonic':time.monotonic()})
     current_sessions=[]
     with db() as c:
         current_sessions=[dict(r) for r in c.execute('SELECT day,exam_id,completed,notebooklm_import_id FROM sessions WHERE day BETWEEN ? AND ?',
             (plan['planning_period']['start_date'],plan['planning_period']['end_date']))]
+        existing_exam_ids={r['id'] for exam in plan['exams'] for r in c.execute(
+            "SELECT id FROM exams WHERE source='notebooklm' AND lower(name)=lower(?) AND lower(cargo)=lower(?)",
+            (exam['name'],exam['cargo']))}
+    current_sessions=[x for x in current_sessions if x['exam_id'] in existing_exam_ids]
     existing_pending=sum(1 for x in current_sessions if not x['completed'])
+    old_import_ids={x['notebooklm_import_id'] for x in current_sessions if not x['completed'] and x['notebooklm_import_id']}
+    old_events=0
+    if old_import_ids:
+        placeholders=','.join('?'*len(old_import_ids))
+        with db() as c:
+            old_events=c.execute(f'SELECT COUNT(*) FROM events WHERE notebooklm_import_id IN ({placeholders})',tuple(old_import_ids)).fetchone()[0]
     return {'token':token,'filename':filename,'sha256':digest,'title':plan['title'],
        'planning_period':plan['planning_period'],'exams':plan['exams'],'warnings':plan['warnings'],
        'summary':plan['summary'],'existing_pending_sessions':existing_pending,
+       'will_delete_sessions':len([x for x in current_sessions if not x['completed'] and x['notebooklm_import_id']]),
+       'will_delete_events':old_events,
        'first_session_date':min((x['date'] for x in plan['schedule']),default=plan['planning_period']['start_date']),
        'sample_sessions':plan['schedule'][:12]}
 
@@ -1005,8 +1070,7 @@ def notebooklm_confirm(payload:dict):
     mode=squeeze(payload.get('mode') or 'append')
     if mode not in ('append','replace_notebooklm'):
         raise HTTPException(422,'Modo de importação inválido.')
-    pending=notebooklm_previews.get(token)
-    if not pending: raise HTTPException(410,'Prévia expirada. Envie o JSON novamente.')
+    pending=consume_preview(token)
     plan=pending['plan']; batch_id=uuid.uuid4().hex
     exam_ids={}
     with db() as c:
@@ -1034,11 +1098,16 @@ def notebooklm_confirm(payload:dict):
         if mode=='replace_notebooklm':
             # Substitui somente sessões pendentes que vieram do NotebookLM no período informado.
             # Sessões concluídas e sessões criadas manualmente permanecem intactas.
-            c.execute('''DELETE FROM sessions WHERE completed=0 AND COALESCE(notebooklm_import_id,'')<>''
+            exam_placeholders=','.join('?'*len(exam_ids))
+            old_ids=[r['notebooklm_import_id'] for r in c.execute(f'''SELECT DISTINCT notebooklm_import_id FROM sessions
+              WHERE completed=0 AND COALESCE(notebooklm_import_id,'')<>'' AND exam_id IN ({exam_placeholders})
               AND day BETWEEN ? AND ?''',
-              (plan['planning_period']['start_date'],plan['planning_period']['end_date']))
-            c.execute('''DELETE FROM events WHERE origin='notebooklm' AND start_date<=? AND end_date>=?''',
-              (plan['planning_period']['end_date'],plan['planning_period']['start_date']))
+              list(exam_ids.values())+[plan['planning_period']['start_date'],plan['planning_period']['end_date']])]
+            if old_ids:
+                placeholders=','.join('?'*len(old_ids))
+                c.execute(f'''DELETE FROM sessions WHERE completed=0 AND notebooklm_import_id IN ({placeholders})
+                  AND day BETWEEN ? AND ?''',old_ids+[plan['planning_period']['start_date'],plan['planning_period']['end_date']])
+                c.execute(f'DELETE FROM events WHERE notebooklm_import_id IN ({placeholders})',old_ids)
         for item in plan['schedule']:
             exam_id=exam_ids.get(item['exam_ref']) if item['exam_ref'] else None
             sid=imported_subject_id(c,item['subject'])
@@ -1056,14 +1125,13 @@ def notebooklm_confirm(payload:dict):
             already=c.execute('''SELECT id FROM events WHERE origin='notebooklm' AND title=? AND type=?
               AND start_date=? AND end_date=? LIMIT 1''',(title,event['type'],event['start_date'],event['end_date'])).fetchone()
             if not already:
-                c.execute('''INSERT INTO events(exam_id,title,type,start_date,end_date,status,origin,notes,source_reference,created)
-                  VALUES(?,?,?,?,?,'pendente','notebooklm',?,?,?)''',
-                  (exam_id,title,event['type'],event['start_date'],event['end_date'],event['notes'],event['source_reference'],now()))
+                c.execute('''INSERT INTO events(exam_id,title,type,start_date,end_date,status,origin,notes,source_reference,notebooklm_import_id,created)
+                  VALUES(?,?,?,?,?,'pendente','notebooklm',?,?,?,?)''',
+                  (exam_id,title,event['type'],event['start_date'],event['end_date'],event['notes'],event['source_reference'],batch_id,now()))
         c.execute('''INSERT INTO notebooklm_imports(id,filename,sha256,plan_title,exam_count,session_count,event_count,period_start,period_end,created)
           VALUES(?,?,?,?,?,?,?,?,?,?)''',
           (batch_id,pending['filename'],pending['sha256'],plan['title'],len(plan['exams']),len(plan['schedule']),
            len(plan['events']),plan['planning_period']['start_date'],plan['planning_period']['end_date'],now()))
-    notebooklm_previews.pop(token,None)
     return {'ok':True,'import_id':batch_id,'exams':len(plan['exams']),'sessions':len(plan['schedule']),
             'events':len(plan['events']),'first_session_date':min((x['date'] for x in plan['schedule']),default=plan['planning_period']['start_date']),
             'message':'Planejamento importado para o calendário.'}

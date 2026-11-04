@@ -59,6 +59,13 @@ def upload_plan(data, filename='editalos_plano.json'):
 
 
 class NotebookLMIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        with app_module.db() as conn:
+            for table in ('topic_progress', 'reviews', 'attempts', 'questions', 'sessions', 'events',
+                          'exam_subjects', 'exams', 'notebooklm_imports', 'proposals', 'plan_versions'):
+                conn.execute(f'DELETE FROM {table}')
+        app_module.init_db()
+
     def test_legacy_database_migration_preserves_existing_data(self):
         old_path = app_module.DB_PATH
         with tempfile.TemporaryDirectory(prefix='editalos-legacy-') as folder:
@@ -177,6 +184,41 @@ class NotebookLMIntegrationTests(unittest.TestCase):
         self.assertTrue(any(s['subject_id'] == 'portugues' and s['topic'] == 'Sessão manual' for s in final))
         self.assertFalse(any(s.get('notebooklm_import_id') and s['day'] == '2026-11-05' and not s['completed'] for s in final))
         self.assertTrue(any(s.get('notebooklm_import_id') and s['day'] == '2026-11-06' for s in final))
+
+    def test_replace_does_not_delete_overlapping_import_for_other_exam(self):
+        first = upload_plan(plan(title='Plano A'), 'plano-a.json')
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(client.post('/api/notebooklm/confirm', json={'token': first.json()['token'], 'mode': 'append'}).status_code, 200)
+
+        other = plan(title='Plano B')
+        other['exams'][0]['ref'] = 'concurso_b'
+        other['exams'][0]['name'] = 'Outro Concurso de Teste'
+        for item in other['schedule']:
+            item['exam_ref'] = 'concurso_b'
+        other['events'][0]['exam_ref'] = 'concurso_b'
+        second = upload_plan(other, 'plano-b.json')
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(client.post('/api/notebooklm/confirm', json={'token': second.json()['token'], 'mode': 'append'}).status_code, 200)
+
+        revised = upload_plan(plan(title='Plano A revisado', session_dates=['2026-11-06']), 'plano-a-revisado.json')
+        self.assertEqual(revised.status_code, 200, revised.text)
+        preview = revised.json()
+        self.assertEqual(preview['will_delete_sessions'], 2)
+        self.assertEqual(client.post('/api/notebooklm/confirm', json={'token': preview['token'], 'mode': 'replace_notebooklm'}).status_code, 200)
+        sessions = client.get('/api/bootstrap').json()['sessions']
+        self.assertTrue(any(s['exam_name'] == 'Outro Concurso de Teste' and s['day'] == '2026-11-04' for s in sessions))
+        self.assertTrue(any(s.get('notebooklm_import_id') and s['day'] == '2026-11-06' for s in sessions))
+
+    def test_preview_token_is_consumed_after_confirmation(self):
+        response = upload_plan(plan(title='Token único'), 'token-unico.json')
+        self.assertEqual(response.status_code, 200)
+        payload = {'token': response.json()['token'], 'mode': 'append'}
+        self.assertEqual(client.post('/api/notebooklm/confirm', json=payload).status_code, 200)
+        self.assertEqual(client.post('/api/notebooklm/confirm', json=payload).status_code, 410)
+
+    def test_invalid_update_ids_return_not_found(self):
+        self.assertEqual(client.patch('/api/events/999999', json={'status': 'concluido'}).status_code, 404)
+        self.assertEqual(client.patch('/api/reviews/999999', json={}).status_code, 404)
 
 
 if __name__ == '__main__':
