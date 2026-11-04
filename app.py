@@ -22,7 +22,8 @@ from fastapi.responses import FileResponse, Response, PlainTextResponse
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path(os.getenv('EDITALOS_DATA', str(ROOT / 'data')))
+DEFAULT_DATA_DIR = '/tmp/editalos' if os.getenv('VERCEL') == '1' else str(ROOT / 'data')
+DATA_DIR = Path(os.getenv('EDITALOS_DATA', DEFAULT_DATA_DIR))
 UPLOAD_DIR = DATA_DIR / 'uploads'
 DB_PATH = DATA_DIR / 'editalos.db'
 STATIC = ROOT / 'static'
