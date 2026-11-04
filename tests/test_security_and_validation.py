@@ -48,6 +48,12 @@ class SecurityAndValidationTests(unittest.TestCase):
         javascript = client.get('/static/app.js').text
         self.assertIn("new Set((p.warnings||[]).filter(w=>typeof w==='string'&&w.trim()))", javascript)
 
+    def test_frontend_has_serverless_browser_backup_recovery(self):
+        javascript = client.get('/static/app.js').text
+        self.assertIn('editalos.browser.backup.v1', javascript)
+        self.assertIn('recoverBrowserBackup', javascript)
+        self.assertIn('syncBrowserBackup', javascript)
+
     def test_import_button_opens_file_picker_and_completed_events_are_hidden(self):
         javascript = client.get('/static/app.js').text
         html = client.get('/').text
