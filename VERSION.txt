@@ -1,0 +1,3 @@
+EditalOS 3.0.0
+Agenda diária integrada ao NotebookLM por arquivo JSON.
+Sem IA incorporada, sem API e sem Ollama.

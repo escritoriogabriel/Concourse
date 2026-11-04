@@ -1,0 +1,27 @@
+PROMPT OFICIAL — EDITALOS / NOTEBOOKLM
+
+1. Adicione os editais de abertura, anexos de conteúdo programático, retificações e demais documentos oficiais como fontes do NotebookLM.
+2. Abra o menu Planejamento NotebookLM no EditalOS e clique em “Gerar prompt personalizado”. O prompt considera as horas e os dias disponíveis configurados no aplicativo, além dos concursos que já estão cadastrados.
+3. Copie o prompt completo para o chat do NotebookLM.
+4. Peça a criação do arquivo único editalos_plano.json, conforme o esquema especificado no prompt.
+5. Baixe o JSON gerado e importe-o no EditalOS. Confira a prévia e só então confirme a inclusão no calendário.
+
+FORMATO DE ARQUIVO
+- Preferencial: JSON UTF-8 com o nome editalos_plano.json.
+- Alternativas: TXT ou Markdown contendo somente o objeto JSON (sem explicações fora do objeto). Se houver um bloco ```json, o importador remove as cercas.
+- O limite atual de upload é 8 MB.
+
+O QUE O ARQUIVO DEVE CONTER
+- schema: editalos.notebooklm.v1
+- metadata: título, data de geração e fontes utilizadas
+- planning_period: início e fim do período planejado
+- exams: um registro por concurso/cargo, com órgão, banca, datas, prioridade, matérias, pesos, quantitativos e tópicos
+- schedule: blocos diários com data, horário, duração, concurso, matéria, tópico, tipo de atividade, objetivo, referência do edital e filtros para o QConcursos quando a atividade for resolver questões
+- events: inscrições, isenções, pagamentos, provas, recursos e outros prazos oficiais, sempre com fonte
+
+IMPORTANTE
+- Não invente datas oficiais, pesos ou quantitativos. Use null ou omita quando o edital não informar.
+- Separe cargos diferentes quando os conteúdos forem distintos.
+- Se houver matérias comuns a vários cargos, preserve o vínculo dos tópicos a cada cargo/concurso.
+- Não copie questões, enunciados, alternativas, comentários ou gabaritos do QConcursos. Informe apenas os filtros para que o usuário resolva as questões na própria conta.
+- O EditalOS não executa IA. Ele valida a estrutura, mostra uma prévia e grava os blocos no calendário somente após a confirmação do usuário.

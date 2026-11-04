@@ -1,0 +1,112 @@
+{
+  "schema": "editalos.notebooklm.v1",
+  "metadata": {
+    "title": "MODELO — substituir pelo planejamento real",
+    "generated_at": "2026-11-03",
+    "sources": [
+      {
+        "name": "EDITAL_EXEMPLO.pdf",
+        "reference": "Exemplo fictício; substituir pelas fontes e páginas do NotebookLM"
+      }
+    ]
+  },
+  "planning_period": {
+    "start_date": "2026-11-04",
+    "end_date": "2026-11-10"
+  },
+  "exams": [
+    {
+      "ref": "concurso_exemplo",
+      "name": "Concurso Público — EXEMPLO FICTÍCIO",
+      "institution": "Órgão demonstrativo",
+      "banca": "Banca demonstrativa",
+      "cargo": "Analista — exemplo",
+      "priority": 3,
+      "exam_date": "2027-02-14",
+      "registration_start": null,
+      "registration_end": null,
+      "exemption_start": null,
+      "exemption_end": null,
+      "subjects": [
+        {
+          "name": "Direito Administrativo",
+          "weight": 2,
+          "questions": 10,
+          "topics": [
+            "Atos administrativos",
+            "Poderes administrativos"
+          ]
+        },
+        {
+          "name": "Língua Portuguesa",
+          "weight": 1,
+          "questions": 10,
+          "topics": [
+            "Interpretação de textos"
+          ]
+        }
+      ]
+    }
+  ],
+  "schedule": [
+    {
+      "date": "2026-11-04",
+      "start_time": "08:00",
+      "minutes": 50,
+      "exam_ref": "concurso_exemplo",
+      "subject": "Direito Administrativo",
+      "topic": "Atos administrativos",
+      "activity_type": "teoria",
+      "objective": "Estudar os atributos e elementos dos atos administrativos e registrar dúvidas.",
+      "qconcursos": {
+        "enabled": false,
+        "subject": "Direito Administrativo",
+        "topic": "Atos administrativos",
+        "bank": "",
+        "institution": "",
+        "year_from": 2020,
+        "year_to": 2026,
+        "difficulty": "média",
+        "mode": "múltipla escolha",
+        "quantity": 0,
+        "filter_notes": ""
+      },
+      "source_reference": "Exemplo fictício — não usar como referência de edital"
+    },
+    {
+      "date": "2026-11-05",
+      "start_time": "08:00",
+      "minutes": 45,
+      "exam_ref": "concurso_exemplo",
+      "subject": "Direito Administrativo",
+      "topic": "Atos administrativos",
+      "activity_type": "questoes",
+      "objective": "Resolver 20 questões e anotar os erros por assunto.",
+      "qconcursos": {
+        "enabled": true,
+        "subject": "Direito Administrativo",
+        "topic": "Atos administrativos",
+        "bank": "FGV",
+        "institution": "",
+        "year_from": 2020,
+        "year_to": 2026,
+        "difficulty": "média",
+        "mode": "múltipla escolha",
+        "quantity": 20,
+        "filter_notes": "Priorizar questões recentes; não copiar enunciados ou gabaritos para o EditalOS."
+      },
+      "source_reference": "Tópico previsto no conteúdo programático — exemplo fictício"
+    }
+  ],
+  "events": [
+    {
+      "title": "Prova — concurso demonstrativo",
+      "type": "prova",
+      "start_date": "2027-02-14",
+      "end_date": "2027-02-14",
+      "exam_ref": "concurso_exemplo",
+      "notes": "Data fictícia para demonstrar o formato do arquivo.",
+      "source_reference": "Não representa edital real."
+    }
+  ]
+}

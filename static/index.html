@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f6f7fb">
+  <meta name="description" content="EditalOS: sua agenda diária de estudos, alimentada por planejamentos do NotebookLM.">
+  <title>EditalOS · Agenda de estudos</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="app-shell">
+ <aside class="sidebar" id="sidebar">
+  <div class="brand"><div class="brand-icon">E<span>.</span></div><div><strong>EditalOS</strong><small>AGENDA DE ESTUDOS</small></div></div>
+  <div class="side-label">ESPAÇO DE ESTUDOS</div>
+  <nav id="navigation" aria-label="Menu principal"></nav>
+  <div class="side-bottom">
+   <div class="aside-note"><span class="live-dot"></span><strong>Organizador local</strong><small>O NotebookLM cria o plano. O EditalOS organiza sua execução.</small></div>
+   <div class="profile"><div class="avatar">ES</div><div><strong>Meu espaço</strong><small>Preparação pessoal</small></div><span class="profile-mark">●</span></div>
+  </div>
+ </aside>
+ <div class="app-main">
+  <header class="topbar">
+   <button class="mobile-menu icon-button" data-action="menu" aria-label="Abrir menu">☰</button>
+   <div class="crumb"><span>Meu espaço</span><span class="slash">/</span><strong id="crumbName">Minha agenda</strong></div>
+   <div class="top-actions"><span class="today" id="todayText"></span><button class="button button-light top-cta" data-action="new-event">+ Prazo</button><button class="button button-primary" data-action="go-notebooklm">＋ Importar planejamento</button></div>
+  </header>
+  <main id="page" tabindex="-1"><div class="loading">Preparando sua agenda...</div></main>
+ </div>
+</div>
+<div id="modal-root"></div><div id="toast-root" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
