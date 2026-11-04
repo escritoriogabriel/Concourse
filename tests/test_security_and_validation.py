@@ -54,12 +54,27 @@ class SecurityAndValidationTests(unittest.TestCase):
         self.assertIn('recoverBrowserBackup', javascript)
         self.assertIn('syncBrowserBackup', javascript)
 
+    def test_calendar_is_monthly_and_opens_day_details(self):
+        javascript = client.get('/static/app.js').text
+        self.assertIn('calendar-grid calendar-days', javascript)
+        self.assertIn('calendar-tag', javascript)
+        self.assertIn("data-action=\"day-details\"", javascript)
+        self.assertIn('dayDetailsModal', javascript)
+        self.assertIn("case 'month-prev'", javascript)
+        self.assertIn("case 'month-next'", javascript)
+
+    def test_completion_reconciles_stale_ids_without_red_error(self):
+        javascript = client.get('/static/app.js').text
+        self.assertIn('completeResource', javascript)
+        self.assertIn('Este bloco já não está disponível', javascript)
+        self.assertIn('Este prazo já não está disponível', javascript)
+
     def test_import_button_opens_file_picker_and_completed_events_are_hidden(self):
         javascript = client.get('/static/app.js').text
         html = client.get('/').text
         self.assertIn("case 'open-import'", javascript)
         self.assertIn("$('#notebookPlanUpload')?.click()", javascript)
-        self.assertIn("e.status!=='concluido'", javascript)
+        self.assertIn("x.status!=='concluido'", javascript)
         self.assertIn('data-action="open-import"', html)
 
     def test_storage_status_and_full_backup_restore(self):
