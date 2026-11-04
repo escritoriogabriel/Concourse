@@ -1495,6 +1495,25 @@ def storage_status():
             'last_saved':datetime.fromtimestamp(DB_PATH.stat().st_mtime,TZ).isoformat(timespec='seconds') if DB_PATH.exists() else None,
             'counts':counts}
 
+@app.post('/api/storage/reset')
+def reset_storage(payload:dict):
+    if payload.get('confirmation')!='RESETAR TUDO':
+        raise HTTPException(422,'Digite exatamente RESETAR TUDO para confirmar a limpeza.')
+    tables=('editals','reviews','attempts','questions','proposals','plan_versions','topic_progress','notebooklm_imports',
+            'spaced_reviews','error_notebook','study_logs','sessions','events','exam_subjects','exams','settings')
+    with db() as c:
+        c.execute('PRAGMA foreign_keys=OFF')
+        for table in tables: c.execute(f'DELETE FROM {table}')
+        c.execute('DELETE FROM sqlite_sequence')
+        c.execute('PRAGMA foreign_keys=ON')
+    if UPLOAD_DIR.exists():
+        for path in UPLOAD_DIR.rglob('*'):
+            if path.is_file(): path.unlink()
+    with preview_lock:
+        notebooklm_previews.clear()
+    init_db()
+    return {'ok':True,'message':'Aplicação resetada. O catálogo básico de matérias foi preservado.'}
+
 @app.post('/api/import/backup.json')
 async def import_backup(file:UploadFile=File(...)):
     raw=await file.read(25*1024*1024)

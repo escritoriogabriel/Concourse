@@ -68,6 +68,16 @@ class SecurityAndValidationTests(unittest.TestCase):
         })
         self.assertEqual(restored_zip.status_code, 200, restored_zip.text)
 
+    def test_reset_requires_phrase_and_preserves_subject_catalog(self):
+        client.post('/api/sessions', json={'day': '2026-11-04', 'subject_id': 'portugues', 'minutes': 50})
+        self.assertEqual(client.post('/api/storage/reset', json={'confirmation': 'apagar'}).status_code, 422)
+        response = client.post('/api/storage/reset', json={'confirmation': 'RESETAR TUDO'})
+        self.assertEqual(response.status_code, 200, response.text)
+        data = client.get('/api/bootstrap').json()
+        self.assertEqual(data['sessions'], [])
+        self.assertEqual(data['exams'], [])
+        self.assertGreater(len(data['subjects']), 0)
+
     def test_settings_reject_unknown_strategy(self):
         response = client.post('/api/settings', json={
             'weekly_hours': 20, 'buffer_pct': 10, 'strategy': 'unsafe',
