@@ -62,6 +62,11 @@ class SecurityAndValidationTests(unittest.TestCase):
         })
         self.assertEqual(restored.status_code, 200, restored.text)
         self.assertEqual(client.get('/api/storage/status').json()['counts']['sessions'], 1)
+        zipped = client.get('/api/export/backup.zip')
+        restored_zip = client.post('/api/import/backup.json', files={
+            'file': ('backup.zip', zipped.content, 'application/zip'),
+        })
+        self.assertEqual(restored_zip.status_code, 200, restored_zip.text)
 
     def test_settings_reject_unknown_strategy(self):
         response = client.post('/api/settings', json={

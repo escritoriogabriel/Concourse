@@ -1498,6 +1498,18 @@ def storage_status():
 @app.post('/api/import/backup.json')
 async def import_backup(file:UploadFile=File(...)):
     raw=await file.read(25*1024*1024)
+    upload_entries=[]
+    if Path(file.filename or '').suffix.lower()=='.zip':
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                raw=archive.read('editalos-backup.json')
+                for name in archive.namelist():
+                    if name.startswith('data/uploads/') and not name.endswith('/'):
+                        relative=Path(name).relative_to('data/uploads')
+                        if '..' in relative.parts: raise ValueError('caminho de upload inválido')
+                        upload_entries.append((relative,archive.read(name)))
+        except (zipfile.BadZipFile, KeyError, ValueError) as exc:
+            raise HTTPException(422,f'Backup ZIP inválido: {str(exc)[:160]}')
     try:
         payload=json.loads(raw.decode('utf-8-sig'))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1520,6 +1532,13 @@ async def import_backup(file:UploadFile=File(...)):
                 keys=','.join(values); marks=','.join('?' for _ in values)
                 c.execute(f'INSERT INTO {table} ({keys}) VALUES ({marks})',tuple(values.values()))
         c.execute('PRAGMA foreign_keys=ON')
+    if upload_entries:
+        for path in UPLOAD_DIR.rglob('*'):
+            if path.is_file(): path.unlink()
+        for relative,content in upload_entries:
+            destination=UPLOAD_DIR/relative
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            destination.write_bytes(content)
     return {'ok':True,'message':'Backup restaurado. A aplicação voltou a usar os dados salvos no arquivo.'}
 
 
