@@ -39,6 +39,14 @@ class SecurityAndValidationTests(unittest.TestCase):
         self.assertIn("replace(/[&<>\"']/g", javascript)
         self.assertIn("textContent=message", javascript)
 
+    def test_import_button_opens_file_picker_and_completed_events_are_hidden(self):
+        javascript = client.get('/static/app.js').text
+        html = client.get('/').text
+        self.assertIn("case 'open-import'", javascript)
+        self.assertIn("$('#notebookPlanUpload')?.click()", javascript)
+        self.assertIn("e.status!=='concluido'", javascript)
+        self.assertIn('data-action="open-import"', html)
+
     def test_settings_reject_unknown_strategy(self):
         response = client.post('/api/settings', json={
             'weekly_hours': 20, 'buffer_pct': 10, 'strategy': 'unsafe',
