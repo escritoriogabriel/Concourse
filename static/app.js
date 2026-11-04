@@ -101,7 +101,7 @@ async function action(type,el){try{switch(type){
  case 'view-content':state.contentExamId=Number(el.dataset.id);go('content');break;
  case 'export-ics':window.location.href='/api/calendar/export.ics';break;
  }}catch(e){toast(e.message,true)}}
-document.addEventListener('click',e=>{const el=e.target.closest('[data-action]');if(!el)return;const actionName=el.dataset.action;if(el.tagName==='A'&&el.target==='_blank')return;e.preventDefault();action(actionName,el)});
+document.addEventListener('click',e=>{const el=e.target.closest('[data-action]');if(!el)return;if(el.dataset.action==='modal-backdrop'&&e.target!==el)return;const actionName=el.dataset.action;if(el.tagName==='A'&&el.target==='_blank')return;e.preventDefault();action(actionName,el)});
 document.addEventListener('change',async e=>{
  if(e.target.id==='notebookPlanUpload'){const f=e.target.files?.[0];if(f)await uploadNotebookFile(f);e.target.value='';return}
  if(e.target.id==='backupUpload'){const f=e.target.files?.[0];if(f){if(!window.confirm('Restaurar este backup substituirá os dados atuais. Continuar?')){e.target.value='';return}try{const fd=new FormData();fd.append('file',f);const r=await fetch('/api/import/backup.json',{method:'POST',body:fd});const b=await r.json();if(!r.ok)throw new Error(b.detail||'Falha ao restaurar backup.');state.notebookPreview=null;await refresh();toast(b.message||'Backup restaurado.')}catch(err){toast(err.message,true)}}e.target.value='';return}

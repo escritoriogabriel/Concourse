@@ -39,6 +39,11 @@ class SecurityAndValidationTests(unittest.TestCase):
         self.assertIn("replace(/[&<>\"']/g", javascript)
         self.assertIn("textContent=message", javascript)
 
+    def test_modal_backdrop_only_closes_on_direct_click(self):
+        javascript = client.get('/static/app.js').text
+        self.assertIn("e.target!==el", javascript)
+        self.assertIn("el.dataset.action==='modal-backdrop'", javascript)
+
     def test_import_button_opens_file_picker_and_completed_events_are_hidden(self):
         javascript = client.get('/static/app.js').text
         html = client.get('/').text
