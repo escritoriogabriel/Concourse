@@ -12,6 +12,7 @@ import uuid
 import hashlib
 import threading
 import time
+import zipfile
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -56,9 +57,12 @@ SUBJECTS = [
 
 @contextmanager
 def db():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
+    conn.execute('PRAGMA busy_timeout=15000')
+    conn.execute('PRAGMA synchronous=NORMAL')
     try:
         yield conn
         conn.commit()
@@ -1460,9 +1464,63 @@ def export_study_csv():
 
 @app.get('/api/export/backup.json')
 def export_backup():
+    tables=('subjects','exams','exam_subjects','events','sessions','study_logs','error_notebook','spaced_reviews',
+            'settings','notebooklm_imports','topic_progress','plan_versions','proposals','questions','attempts','reviews','editals')
     with db() as c:
-        return {table:[dict(r) for r in c.execute(f'SELECT * FROM {table}')] for table in
-                ('subjects','exams','exam_subjects','events','sessions','study_logs','error_notebook','spaced_reviews','settings','notebooklm_imports')}
+        payload={table:[dict(r) for r in c.execute(f'SELECT * FROM {table}')] for table in tables}
+    payload['_meta']={'format':'editalos.backup.v1','created_at':now(),'database':'SQLite','data_dir':str(DATA_DIR)}
+    return payload
+
+@app.get('/api/export/backup.zip')
+def export_backup_zip():
+    payload=export_backup()
+    buffer=io.BytesIO()
+    with zipfile.ZipFile(buffer,'w',zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('editalos-backup.json',json.dumps(payload,ensure_ascii=False,indent=2))
+        if UPLOAD_DIR.exists():
+            for path in UPLOAD_DIR.rglob('*'):
+                if path.is_file(): archive.write(path,path.relative_to(DATA_DIR).as_posix())
+    buffer.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(buffer,media_type='application/zip',headers={'Content-Disposition':'attachment; filename="editalos-backup.zip"'})
+
+@app.get('/api/storage/status')
+def storage_status():
+    tables=('exams','sessions','events','study_logs','notebooklm_imports','spaced_reviews','error_notebook')
+    with db() as c:
+        counts={table:c.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] for table in tables}
+    return {'persistent':os.getenv('VERCEL')!='1',
+            'ephemeral_environment':os.getenv('VERCEL')=='1',
+            'data_dir':str(DATA_DIR),'database_exists':DB_PATH.exists(),'database_bytes':DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+            'last_saved':datetime.fromtimestamp(DB_PATH.stat().st_mtime,TZ).isoformat(timespec='seconds') if DB_PATH.exists() else None,
+            'counts':counts}
+
+@app.post('/api/import/backup.json')
+async def import_backup(file:UploadFile=File(...)):
+    raw=await file.read(25*1024*1024)
+    try:
+        payload=json.loads(raw.decode('utf-8-sig'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(422,f'Backup inválido: {str(exc)[:160]}')
+    if payload.get('_meta',{}).get('format')!='editalos.backup.v1':
+        raise HTTPException(422,'Formato de backup incompatível.')
+    tables=('subjects','exams','exam_subjects','events','sessions','study_logs','error_notebook','spaced_reviews',
+            'settings','notebooklm_imports','topic_progress','plan_versions','proposals','questions','attempts','reviews','editals')
+    with db() as c:
+        c.execute('PRAGMA foreign_keys=OFF')
+        for table in reversed(tables): c.execute(f'DELETE FROM {table}')
+        for table in tables:
+            rows=payload.get(table,[])
+            if not isinstance(rows,list): raise HTTPException(422,f'Tabela inválida no backup: {table}')
+            columns={row['name'] for row in c.execute(f'PRAGMA table_info({table})')}
+            for row in rows:
+                if not isinstance(row,dict): raise HTTPException(422,f'Registro inválido na tabela {table}')
+                values={key:value for key,value in row.items() if key in columns}
+                if not values: continue
+                keys=','.join(values); marks=','.join('?' for _ in values)
+                c.execute(f'INSERT INTO {table} ({keys}) VALUES ({marks})',tuple(values.values()))
+        c.execute('PRAGMA foreign_keys=ON')
+    return {'ok':True,'message':'Backup restaurado. A aplicação voltou a usar os dados salvos no arquivo.'}
 
 
 @app.get('/api/editals/{edital_id}/pdf')

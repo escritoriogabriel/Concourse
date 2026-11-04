@@ -47,6 +47,22 @@ class SecurityAndValidationTests(unittest.TestCase):
         self.assertIn("e.status!=='concluido'", javascript)
         self.assertIn('data-action="open-import"', html)
 
+    def test_storage_status_and_full_backup_restore(self):
+        client.post('/api/sessions', json={'day': '2026-11-04', 'subject_id': 'portugues', 'minutes': 50})
+        status = client.get('/api/storage/status')
+        self.assertEqual(status.status_code, 200)
+        self.assertTrue(status.json()['database_exists'])
+        self.assertEqual(status.json()['counts']['sessions'], 1)
+        backup = client.get('/api/export/backup.json')
+        self.assertEqual(backup.status_code, 200)
+        self.assertEqual(backup.json()['_meta']['format'], 'editalos.backup.v1')
+        self.assertIn('topic_progress', backup.json())
+        restored = client.post('/api/import/backup.json', files={
+            'file': ('backup.json', backup.content, 'application/json'),
+        })
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(client.get('/api/storage/status').json()['counts']['sessions'], 1)
+
     def test_settings_reject_unknown_strategy(self):
         response = client.post('/api/settings', json={
             'weekly_hours': 20, 'buffer_pct': 10, 'strategy': 'unsafe',
