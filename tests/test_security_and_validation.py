@@ -44,6 +44,10 @@ class SecurityAndValidationTests(unittest.TestCase):
         self.assertIn("e.target!==el", javascript)
         self.assertIn("el.dataset.action==='modal-backdrop'", javascript)
 
+    def test_warning_notices_filter_empty_and_duplicate_messages(self):
+        javascript = client.get('/static/app.js').text
+        self.assertIn("new Set((p.warnings||[]).filter(w=>typeof w==='string'&&w.trim()))", javascript)
+
     def test_import_button_opens_file_picker_and_completed_events_are_hidden(self):
         javascript = client.get('/static/app.js').text
         html = client.get('/').text

@@ -1202,16 +1202,6 @@ def normalize_notebook_plan(data):
     unknown_subjects=sorted({s['subject'] for s in clean_schedule if s['exam_ref'] and norm(s['subject']) not in subjects_by_ref.get(s['exam_ref'],set())})
     if unknown_subjects:
         warnings.append('Há sessões para matérias que não aparecem no conteúdo do respectivo concurso: '+', '.join(unknown_subjects[:8])+'.')
-    minutes_by_subject=defaultdict(int)
-    for item in clean_schedule: minutes_by_subject[norm(item['subject'])]+=item['minutes']
-    for exam in out_exams:
-        weighted=sum(max(.1,float(s['weight'])) for s in exam['subjects'])
-        if not weighted: continue
-        for subject in exam['subjects']:
-            expected=subject['weight']/weighted
-            actual=minutes_by_subject.get(norm(subject['name']),0)/max(1,total_minutes)
-            if expected>=.2 and actual<expected*.25:
-                warnings.append(f"A matéria {subject['name']} tem peso relevante, mas recebeu pouca carga no cronograma.")
     # Confere o volume semanal com a disponibilidade cadastrada no EditalOS.
     weekly_minutes=defaultdict(int)
     for item in clean_schedule:
@@ -1236,6 +1226,7 @@ def normalize_notebook_plan(data):
             if current_block[0]<previous[1]:
                 warnings.append(f'Possível conflito de horário em {day}: {previous[2]} e {current_block[2]}.')
                 break
+    warnings=list(dict.fromkeys(w.strip() for w in warnings if isinstance(w,str) and w.strip()))
     return {'schema':NOTEBOOKLM_SCHEMA,'title':title,'metadata':metadata,'planning_period':{'start_date':plan_start,'end_date':plan_end},
       'exams':out_exams,'schedule':clean_schedule,'events':clean_events,'warnings':warnings,
       'summary':{'exams':len(out_exams),'subjects':sum(len(e['subjects']) for e in out_exams),

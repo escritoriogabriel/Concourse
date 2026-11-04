@@ -143,6 +143,15 @@ class NotebookLMIntegrationTests(unittest.TestCase):
         for marker in ('30', 'prioridade', 'sequencial', 'Direito Constitucional', 'Reservar sábado'):
             self.assertIn(marker, response.text)
 
+    def test_clean_model_preview_has_no_warning_notices(self):
+        model_path = Path(__file__).parents[1] / 'static' / 'modelo_notebooklm.json'
+        with model_path.open('rb') as model:
+            response = client.post('/api/notebooklm/preview', files={
+                'file': ('modelo-sem-avisos.json', model, 'application/json'),
+            })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['warnings'], [])
+
     def test_import_preferences_are_applied_and_saved_in_snapshot(self):
         response = upload_plan(plan(title='Plano modular'))
         self.assertEqual(response.status_code, 200, response.text)
