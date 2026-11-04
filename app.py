@@ -124,7 +124,20 @@ def init_db():
         CREATE TABLE IF NOT EXISTS notebooklm_imports (id TEXT PRIMARY KEY, filename TEXT NOT NULL,
           sha256 TEXT NOT NULL UNIQUE, plan_title TEXT NOT NULL, exam_count INTEGER DEFAULT 0,
           session_count INTEGER DEFAULT 0, event_count INTEGER DEFAULT 0, period_start TEXT,
-          period_end TEXT, created TEXT NOT NULL);
+          period_end TEXT, plan_json TEXT DEFAULT '{}', created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS study_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL, actual_minutes INTEGER NOT NULL, questions_done INTEGER DEFAULT 0,
+          questions_correct INTEGER DEFAULT 0, difficulty TEXT DEFAULT 'adequada', confidence INTEGER DEFAULT 3,
+          interruptions INTEGER DEFAULT 0, notes TEXT DEFAULT '', created TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS error_notebook (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          subject_id TEXT NOT NULL, topic TEXT DEFAULT '', source TEXT DEFAULT '', error_type TEXT DEFAULT 'conteúdo',
+          note TEXT NOT NULL, status TEXT DEFAULT 'aberto', next_review TEXT, created TEXT NOT NULL,
+          resolved TEXT);
+        CREATE TABLE IF NOT EXISTS spaced_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          subject_id TEXT NOT NULL, exam_id INTEGER, topic TEXT DEFAULT '', due TEXT NOT NULL,
+          interval_days INTEGER DEFAULT 1, ease REAL DEFAULT 2.5, status TEXT DEFAULT 'pendente',
+          last_score REAL, created TEXT NOT NULL, completed TEXT);
         ''')
         # Migração aditiva: preserva banco anterior e amplia apenas metadados.
         exam_columns={row['name'] for row in c.execute('PRAGMA table_info(exams)')}
@@ -136,6 +149,9 @@ def init_db():
                 c.execute("ALTER TABLE events ADD COLUMN " + col + " TEXT DEFAULT ''")
         if 'notebooklm_import_id' not in event_columns:
             c.execute("ALTER TABLE events ADD COLUMN notebooklm_import_id TEXT DEFAULT ''")
+        import_columns={row['name'] for row in c.execute('PRAGMA table_info(notebooklm_imports)')}
+        if 'plan_json' not in import_columns:
+            c.execute("ALTER TABLE notebooklm_imports ADD COLUMN plan_json TEXT DEFAULT '{}'")
         existing_columns={row['name'] for row in c.execute('PRAGMA table_info(sessions)')}
         additions={
           'exam_id':'INTEGER', 'start_time':"TEXT DEFAULT ''", 'topic':"TEXT DEFAULT ''",
@@ -296,6 +312,34 @@ class QuizSubmit(BaseModel):
 class StudySchedule(BaseModel):
     start_day: str | None = None
 
+class StudyLogIn(BaseModel):
+    session_id: int
+    actual_minutes: int = Field(ge=0, le=1440)
+    questions_done: int = Field(default=0, ge=0, le=10000)
+    questions_correct: int = Field(default=0, ge=0, le=10000)
+    difficulty: str = Field(default='adequada', pattern='^(muito fácil|adequada|difícil|não concluída)$')
+    confidence: int = Field(default=3, ge=1, le=5)
+    interruptions: int = Field(default=0, ge=0, le=100)
+    notes: str = Field(default='', max_length=2000)
+
+class ErrorIn(BaseModel):
+    subject_id: str
+    topic: str = Field(default='', max_length=300)
+    source: str = Field(default='', max_length=500)
+    error_type: str = Field(default='conteúdo', pattern='^(conteúdo|interpretação|desatenção|cálculo|memória|pegadinha|outro)$')
+    note: str = Field(min_length=1, max_length=2000)
+    next_review: str | None = None
+
+class ErrorUpdate(BaseModel):
+    status: str = Field(pattern='^(aberto|resolvido)$')
+
+class ReviewResult(BaseModel):
+    score: float = Field(ge=0, le=1)
+
+class ReplanIn(BaseModel):
+    from_day: str | None = None
+    strategy: str = Field(default='distribuir', pattern='^(distribuir|priorizar|revisar)$')
+
 def settings(c):
     return {r['key']:j(r['value']) for r in c.execute('SELECT * FROM settings')}
 
@@ -343,7 +387,7 @@ def home(): return FileResponse(STATIC/'index.html')
 
 @app.get('/static/{filename}')
 def static_file(filename:str):
-    if filename not in ['styles.css','app.js','modelo_notebooklm.json']: raise HTTPException(404)
+    if filename not in ['styles.css','features.css','app.js','modelo_notebooklm.json']: raise HTTPException(404)
     return FileResponse(STATIC/filename)
 
 @app.get('/api/bootstrap')
@@ -359,8 +403,140 @@ def bootstrap():
                 'questions_count':qs,'demo_questions_count':demo,'attempts':attempts[:20],
                 'performance':details,'reviews':[dict(r) for r in c.execute('SELECT * FROM reviews ORDER BY due ASC')],
                 'topic_progress':[dict(r) for r in c.execute('SELECT * FROM topic_progress')],
+                'errors':[dict(r) for r in c.execute("SELECT * FROM error_notebook WHERE status='aberto' ORDER BY COALESCE(next_review,created) LIMIT 100")],
+                'spaced_reviews':[dict(r) for r in c.execute("SELECT * FROM spaced_reviews WHERE status='pendente' ORDER BY due LIMIT 100")],
                 'editals':[dict(r) for r in c.execute('SELECT id, exam_id, filename, created FROM editals ORDER BY id DESC')],
-                'notebooklm_imports':[dict(r) for r in c.execute('SELECT * FROM notebooklm_imports ORDER BY created DESC LIMIT 12')]}
+                'notebooklm_imports':[dict(r) for r in c.execute('SELECT id,filename,plan_title,exam_count,session_count,event_count,period_start,period_end,created FROM notebooklm_imports ORDER BY created DESC LIMIT 12')],
+                'dashboard':dashboard_stats(c)}
+
+def dashboard_stats(c):
+    total=int(c.execute('SELECT COUNT(*) FROM sessions').fetchone()[0])
+    completed=int(c.execute('SELECT COUNT(*) FROM sessions WHERE completed=1').fetchone()[0])
+    planned_minutes=int(c.execute('SELECT COALESCE(SUM(minutes),0) FROM sessions').fetchone()[0])
+    logs=[dict(r) for r in c.execute('SELECT * FROM study_logs')]
+    actual_minutes=sum(int(x['actual_minutes']) for x in logs)
+    questions_done=sum(int(x['questions_done']) for x in logs)
+    questions_correct=sum(int(x['questions_correct']) for x in logs)
+    topics=[dict(r) for r in c.execute('SELECT exam_id,subject_id,topics FROM exam_subjects')]
+    total_topics=sum(len(j(x['topics'],[])) for x in topics)
+    done_topics=int(c.execute('SELECT COUNT(*) FROM topic_progress WHERE done=1').fetchone()[0])
+    today=local_today()
+    overdue=int(c.execute('SELECT COUNT(*) FROM spaced_reviews WHERE status=? AND due<?',('pendente',iso(today))).fetchone()[0])
+    open_errors=int(c.execute("SELECT COUNT(*) FROM error_notebook WHERE status='aberto'").fetchone()[0])
+    risk=[]
+    for row in c.execute('''SELECT s.id,s.name,COUNT(ss.id) planned,COALESCE(SUM(ss.completed),0) completed,
+          COALESCE(SUM(sl.questions_done),0) questions,COALESCE(SUM(sl.questions_correct),0) correct
+          FROM subjects s LEFT JOIN sessions ss ON ss.subject_id=s.id LEFT JOIN study_logs sl ON sl.session_id=ss.id GROUP BY s.id,s.name'''):
+        accuracy=(row['correct']/row['questions']) if row['questions'] else .5
+        adherence=(row['completed']/row['planned']) if row['planned'] else 1
+        score=round((1-accuracy)*60+(1-adherence)*40)
+        risk.append({'subject_id':row['id'],'subject_name':row['name'],'score':score,'level':'alto' if score>=60 else 'médio' if score>=30 else 'baixo','accuracy_pct':round(accuracy*100,1),'adherence_pct':round(adherence*100,1)})
+    risk.sort(key=lambda x:x['score'],reverse=True)
+    return {'planned_sessions':total,'completed_sessions':completed,'adherence_pct':round(completed/total*100,1) if total else 0,
+            'planned_minutes':planned_minutes,'actual_minutes':actual_minutes,
+            'questions_done':questions_done,'questions_correct':questions_correct,
+            'accuracy_pct':round(questions_correct/questions_done*100,1) if questions_done else 0,
+            'topic_coverage_pct':round(done_topics/total_topics*100,1) if total_topics else 0,
+            'topics_done':done_topics,'topics_total':total_topics,'overdue_reviews':overdue,'open_errors':open_errors,
+            'risk':risk[:8]}
+
+@app.get('/api/dashboard')
+def dashboard():
+    with db() as c:
+        return dashboard_stats(c)
+
+@app.get('/api/daily-summary')
+def daily_summary(day:str|None=None):
+    target=validate_date(day) if day else local_today()
+    with db() as c:
+        planned=c.execute('SELECT COUNT(*) FROM sessions WHERE day=?',(iso(target),)).fetchone()[0]
+        completed=c.execute('SELECT COUNT(*) FROM sessions WHERE day=? AND completed=1',(iso(target),)).fetchone()[0]
+        actual=c.execute('''SELECT COALESCE(SUM(sl.actual_minutes),0) FROM study_logs sl JOIN sessions ss ON ss.id=sl.session_id WHERE ss.day=?''',(iso(target),)).fetchone()[0]
+        questions=c.execute('''SELECT COALESCE(SUM(sl.questions_done),0),COALESCE(SUM(sl.questions_correct),0) FROM study_logs sl JOIN sessions ss ON ss.id=sl.session_id WHERE ss.day=?''',(iso(target),)).fetchone()
+        return {'day':iso(target),'planned':planned,'completed':completed,'actual_minutes':actual,'questions_done':questions[0],'questions_correct':questions[1],
+                'adherence_pct':round(completed/planned*100,1) if planned else 0,'message':'Consistência importa mais que perfeição.' if completed==planned else 'Escolha um bloco curto para fechar o dia.'}
+
+@app.get('/api/sessions/{session_id}/focus')
+def focus_session(session_id:int):
+    with db() as c:
+        row=c.execute('''SELECT ss.*,s.name AS subject_name,e.name AS exam_name,e.cargo AS exam_cargo
+          FROM sessions ss LEFT JOIN subjects s ON s.id=ss.subject_id LEFT JOIN exams e ON e.id=ss.exam_id WHERE ss.id=?''',(session_id,)).fetchone()
+        if not row: raise HTTPException(404,'Sessão não encontrada')
+        item=dict(row); item['qconcursos_filters']=j(item.get('qconcursos_filters'),{})
+        item['logs']=[dict(x) for x in c.execute('SELECT * FROM study_logs WHERE session_id=? ORDER BY id DESC',(session_id,))]
+        return item
+
+@app.post('/api/study-logs')
+def create_study_log(p:StudyLogIn):
+    with db() as c:
+        session=c.execute('SELECT id,subject_id,exam_id,topic FROM sessions WHERE id=?',(p.session_id,)).fetchone()
+        if not session: raise HTTPException(404,'Sessão não encontrada')
+        if p.questions_correct>p.questions_done: raise HTTPException(422,'Acertos não podem superar questões realizadas')
+        cur=c.execute('''INSERT INTO study_logs(session_id,actual_minutes,questions_done,questions_correct,difficulty,confidence,interruptions,notes,created)
+          VALUES(?,?,?,?,?,?,?,?,?)''',(p.session_id,p.actual_minutes,p.questions_done,p.questions_correct,p.difficulty,p.confidence,p.interruptions,p.notes,now()))
+        c.execute('UPDATE sessions SET completed=1 WHERE id=?',(p.session_id,))
+        due=local_today()+timedelta(days=1 if p.confidence<=2 or (p.questions_done and p.questions_correct/p.questions_done<.7) else 7)
+        c.execute('''INSERT INTO spaced_reviews(subject_id,exam_id,topic,due,interval_days,ease,last_score,created)
+          VALUES(?,?,?,?,?,?,?,?)''',(session['subject_id'],session['exam_id'],session['topic'] or '',iso(due),1 if p.confidence<=2 else 7,2.5,(p.questions_correct/p.questions_done if p.questions_done else None),now()))
+        return {'ok':True,'id':cur.lastrowid,'review_due':iso(due)}
+
+@app.get('/api/errors')
+def list_errors(status:str='aberto'):
+    with db() as c:
+        if status not in ('aberto','resolvido','todos'): raise HTTPException(422,'Status inválido')
+        query='SELECT * FROM error_notebook ORDER BY CASE WHEN status=\'aberto\' THEN 0 ELSE 1 END, COALESCE(next_review,created)'
+        if status!='todos': query='SELECT * FROM error_notebook WHERE status=? ORDER BY COALESCE(next_review,created)'
+        rows=c.execute(query,(status,) if status!='todos' else ()).fetchall()
+        return [dict(r) for r in rows]
+
+@app.post('/api/errors')
+def create_error(p:ErrorIn):
+    validate_date(p.next_review) if p.next_review else None
+    with db() as c:
+        if not c.execute('SELECT id FROM subjects WHERE id=?',(p.subject_id,)).fetchone(): raise HTTPException(422,'Matéria inválida')
+        cur=c.execute('''INSERT INTO error_notebook(subject_id,topic,source,error_type,note,next_review,created)
+          VALUES(?,?,?,?,?,?,?)''',(p.subject_id,p.topic,p.source,p.error_type,p.note,p.next_review,now()))
+        return {'ok':True,'id':cur.lastrowid}
+
+@app.patch('/api/errors/{error_id}')
+def update_error(error_id:int,p:ErrorUpdate):
+    with db() as c:
+        if not c.execute('SELECT id FROM error_notebook WHERE id=?',(error_id,)).fetchone(): raise HTTPException(404,'Erro não encontrado')
+        c.execute('UPDATE error_notebook SET status=?,resolved=? WHERE id=?',(p.status,now() if p.status=='resolvido' else None,error_id))
+    return {'ok':True}
+
+@app.get('/api/reviews')
+def list_reviews():
+    with db() as c:
+        return [dict(r) for r in c.execute('''SELECT sr.*,s.name AS subject_name,e.name AS exam_name FROM spaced_reviews sr
+          LEFT JOIN subjects s ON s.id=sr.subject_id LEFT JOIN exams e ON e.id=sr.exam_id
+          WHERE sr.status='pendente' ORDER BY sr.due,sr.id''')]
+
+@app.patch('/api/reviews/{review_id}/complete')
+def complete_spaced_review(review_id:int,p:ReviewResult):
+    with db() as c:
+        row=c.execute('SELECT * FROM spaced_reviews WHERE id=? AND status=\'pendente\'',(review_id,)).fetchone()
+        if not row: raise HTTPException(404,'Revisão não encontrada')
+        interval=max(1,round((row['interval_days'] or 1)*(2.0 if p.score>=.85 else 1.0 if p.score>=.6 else .5)))
+        c.execute('UPDATE spaced_reviews SET status=\'concluida\',last_score=?,completed=? WHERE id=?',(p.score,now(),review_id))
+        if p.score<.7:
+            c.execute('''INSERT INTO spaced_reviews(subject_id,exam_id,topic,due,interval_days,ease,last_score,created)
+              VALUES(?,?,?,?,?,?,?,?)''',(row['subject_id'],row['exam_id'],row['topic'],iso(local_today()+timedelta(days=interval)),interval,row['ease'],p.score,now()))
+        return {'ok':True,'next_interval_days':interval}
+
+@app.post('/api/replan')
+def replan(p:ReplanIn):
+    start=validate_date(p.from_day) if p.from_day else local_today()
+    with db() as c:
+        pending=[dict(r) for r in c.execute('''SELECT * FROM sessions WHERE completed=0 AND day<? ORDER BY day,id''',(iso(start),))]
+        if not pending: return {'ok':True,'moved':0,'message':'Nenhuma sessão atrasada.'}
+        days=settings(c).get('study_days',[0,1,2,3,4,5]) or [0]
+        cursor=start; moved=0
+        for item in pending:
+            while cursor.weekday() not in days: cursor+=timedelta(days=1)
+            c.execute('UPDATE sessions SET day=? WHERE id=?',(iso(cursor),item['id']))
+            moved+=1; cursor+=timedelta(days=1)
+        return {'ok':True,'moved':moved,'from_day':iso(start),'strategy':p.strategy}
 
 @app.post('/api/exams')
 def create_exam(payload:NewExam):
@@ -938,6 +1114,20 @@ def normalize_notebook_plan(data):
     no_source=sum(1 for s in clean_schedule if not s['source_reference'])
     if no_topic: warnings.append(f'{no_topic} sessão(ões) sem tópico específico. Confira se a divisão do conteúdo ficou adequada.')
     if no_source: warnings.append(f'{no_source} sessão(ões) sem referência de origem/página. Isso não impede a importação, mas reduz a rastreabilidade.')
+    subjects_by_ref={x['ref']:{norm(s['name']) for s in x['subjects']} for x in out_exams}
+    unknown_subjects=sorted({s['subject'] for s in clean_schedule if s['exam_ref'] and norm(s['subject']) not in subjects_by_ref.get(s['exam_ref'],set())})
+    if unknown_subjects:
+        warnings.append('Há sessões para matérias que não aparecem no conteúdo do respectivo concurso: '+', '.join(unknown_subjects[:8])+'.')
+    minutes_by_subject=defaultdict(int)
+    for item in clean_schedule: minutes_by_subject[norm(item['subject'])]+=item['minutes']
+    for exam in out_exams:
+        weighted=sum(max(.1,float(s['weight'])) for s in exam['subjects'])
+        if not weighted: continue
+        for subject in exam['subjects']:
+            expected=subject['weight']/weighted
+            actual=minutes_by_subject.get(norm(subject['name']),0)/max(1,total_minutes)
+            if expected>=.2 and actual<expected*.25:
+                warnings.append(f"A matéria {subject['name']} tem peso relevante, mas recebeu pouca carga no cronograma.")
     # Confere o volume semanal com a disponibilidade cadastrada no EditalOS.
     weekly_minutes=defaultdict(int)
     for item in clean_schedule:
@@ -1128,13 +1318,51 @@ def notebooklm_confirm(payload:dict):
                 c.execute('''INSERT INTO events(exam_id,title,type,start_date,end_date,status,origin,notes,source_reference,notebooklm_import_id,created)
                   VALUES(?,?,?,?,?,'pendente','notebooklm',?,?,?,?)''',
                   (exam_id,title,event['type'],event['start_date'],event['end_date'],event['notes'],event['source_reference'],batch_id,now()))
-        c.execute('''INSERT INTO notebooklm_imports(id,filename,sha256,plan_title,exam_count,session_count,event_count,period_start,period_end,created)
-          VALUES(?,?,?,?,?,?,?,?,?,?)''',
+        c.execute('''INSERT INTO notebooklm_imports(id,filename,sha256,plan_title,exam_count,session_count,event_count,period_start,period_end,plan_json,created)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
           (batch_id,pending['filename'],pending['sha256'],plan['title'],len(plan['exams']),len(plan['schedule']),
-           len(plan['events']),plan['planning_period']['start_date'],plan['planning_period']['end_date'],now()))
+           len(plan['events']),plan['planning_period']['start_date'],plan['planning_period']['end_date'],json.dumps(plan,ensure_ascii=False),now()))
     return {'ok':True,'import_id':batch_id,'exams':len(plan['exams']),'sessions':len(plan['schedule']),
             'events':len(plan['events']),'first_session_date':min((x['date'] for x in plan['schedule']),default=plan['planning_period']['start_date']),
             'message':'Planejamento importado para o calendário.'}
+
+@app.get('/api/notebooklm/imports/{import_id}/compare')
+def compare_import(import_id:str):
+    with db() as c:
+        current=c.execute('SELECT * FROM notebooklm_imports WHERE id=?',(import_id,)).fetchone()
+        if not current: raise HTTPException(404,'Importação não encontrada')
+        previous=c.execute('SELECT * FROM notebooklm_imports WHERE created<? ORDER BY created DESC LIMIT 1',(current['created'],)).fetchone()
+        if not previous: return {'current':current['id'],'previous':None,'added_sessions':current['session_count'],'removed_sessions':0,'changed_sessions':0,'added_events':current['event_count'],'removed_events':0}
+        new=j(current['plan_json'],{}); old=j(previous['plan_json'],{})
+        def session_key(x): return '|'.join(str(x.get(k,'')) for k in ('date','exam_ref','subject','topic','activity_type','minutes'))
+        def event_key(x): return '|'.join(str(x.get(k,'')) for k in ('title','type','start_date','end_date','exam_ref'))
+        ns={session_key(x) for x in new.get('schedule',[])}; os={session_key(x) for x in old.get('schedule',[])}
+        ne={event_key(x) for x in new.get('events',[])}; oe={event_key(x) for x in old.get('events',[])}
+        return {'current':current['id'],'previous':previous['id'],'added_sessions':len(ns-os),'removed_sessions':len(os-ns),
+                'changed_sessions':abs(len(new.get('schedule',[]))-len(old.get('schedule',[]))),
+                'added_events':len(ne-oe),'removed_events':len(oe-ne),
+                'current_minutes':sum(int(x.get('minutes',0)) for x in new.get('schedule',[])),
+                'previous_minutes':sum(int(x.get('minutes',0)) for x in old.get('schedule',[]))}
+
+@app.get('/api/export/study.csv')
+def export_study_csv():
+    import csv as csv_module
+    output=io.StringIO(); writer=csv_module.writer(output)
+    writer.writerow(['data','materia','topico','minutos_planejados','concluida','minutos_realizados','questoes','acertos','observacoes'])
+    with db() as c:
+        rows=c.execute('''SELECT ss.*,s.name AS subject_name,COALESCE(SUM(sl.actual_minutes),0) AS actual_minutes,
+          COALESCE(SUM(sl.questions_done),0) AS questions_done,COALESCE(SUM(sl.questions_correct),0) AS questions_correct,
+          GROUP_CONCAT(sl.notes,' | ') AS notes FROM sessions ss LEFT JOIN subjects s ON s.id=ss.subject_id
+          LEFT JOIN study_logs sl ON sl.session_id=ss.id GROUP BY ss.id ORDER BY ss.day,ss.id''')
+        for r in rows:
+            writer.writerow([r['day'],r['subject_name'],r['topic'],r['minutes'],int(r['completed']),r['actual_minutes'],r['questions_done'],r['questions_correct'],r['notes'] or ''])
+    return Response(output.getvalue(),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename="editalos_estudos.csv"'})
+
+@app.get('/api/export/backup.json')
+def export_backup():
+    with db() as c:
+        return {table:[dict(r) for r in c.execute(f'SELECT * FROM {table}')] for table in
+                ('subjects','exams','exam_subjects','events','sessions','study_logs','error_notebook','spaced_reviews','settings','notebooklm_imports')}
 
 
 @app.get('/api/editals/{edital_id}/pdf')

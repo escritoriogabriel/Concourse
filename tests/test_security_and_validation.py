@@ -17,6 +17,7 @@ class SecurityAndValidationTests(unittest.TestCase):
             for table in ('topic_progress', 'reviews', 'attempts', 'questions', 'sessions', 'events',
                           'exam_subjects', 'exams', 'notebooklm_imports', 'proposals', 'plan_versions'):
                 conn.execute(f'DELETE FROM {table}')
+            conn.execute('DELETE FROM settings')
         app_module.init_db()
 
     def test_invalid_event_exam_returns_not_found(self):
@@ -59,6 +60,43 @@ class SecurityAndValidationTests(unittest.TestCase):
         with app_module.db() as conn:
             allocation = app_module.allocate(conn)
         self.assertLessEqual(sum(allocation.values()), 1.0)
+
+    def test_study_log_updates_dashboard_and_creates_review(self):
+        import json
+        plan = {
+            'schema': 'editalos.notebooklm.v1',
+            'metadata': {'title': 'Plano adaptativo'},
+            'planning_period': {'start_date': '2026-11-04', 'end_date': '2026-11-10'},
+            'exams': [{'ref': 'x', 'name': 'Concurso X', 'cargo': 'Analista', 'subjects': [{'name': 'Língua Portuguesa', 'topics': ['Interpretação']}]}],
+            'schedule': [{'date': '2026-11-04', 'minutes': 50, 'exam_ref': 'x', 'subject': 'Língua Portuguesa', 'topic': 'Interpretação', 'activity_type': 'teoria'}],
+            'events': [],
+        }
+        preview = client.post('/api/notebooklm/preview', files={'file': ('adaptive.json', json.dumps(plan).encode(), 'application/json')})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(client.post('/api/notebooklm/confirm', json={'token': preview.json()['token'], 'mode': 'append'}).status_code, 200)
+        session_id = client.get('/api/bootstrap').json()['sessions'][0]['id']
+        logged = client.post('/api/study-logs', json={'session_id': session_id, 'actual_minutes': 40, 'questions_done': 10, 'questions_correct': 6, 'confidence': 2})
+        self.assertEqual(logged.status_code, 200, logged.text)
+        dashboard = client.get('/api/dashboard').json()
+        self.assertEqual(dashboard['actual_minutes'], 40)
+        self.assertEqual(dashboard['questions_done'], 10)
+        self.assertEqual(len(client.get('/api/reviews').json()), 1)
+
+    def test_replan_moves_only_pending_past_sessions(self):
+        import app as app_module
+        with app_module.db() as conn:
+            conn.execute("INSERT INTO sessions(day,subject_id,minutes,completed,created) VALUES('2020-01-01','portugues',50,0,'2020-01-01')")
+            conn.execute("INSERT INTO sessions(day,subject_id,minutes,completed,created) VALUES('2020-01-02','portugues',50,1,'2020-01-01')")
+        response = client.post('/api/replan', json={'from_day': '2026-11-04', 'strategy': 'distribuir'})
+        self.assertEqual(response.status_code, 200)
+        sessions = client.get('/api/bootstrap').json()['sessions']
+        self.assertTrue(any(s['day'] == '2026-11-04' and not s['completed'] for s in sessions))
+        self.assertTrue(any(s['day'] == '2020-01-02' and s['completed'] for s in sessions))
+
+    def test_study_csv_export_is_available(self):
+        response = client.get('/api/export/study.csv')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data,materia,topico', response.text)
 
 
 if __name__ == '__main__':
