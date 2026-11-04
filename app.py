@@ -1,6 +1,7 @@
 """EditalOS — MVP local, auditable, single-user. Run: uvicorn app:app --reload"""
 from __future__ import annotations
 import csv
+import copy
 import io
 import json
 import os
@@ -340,6 +341,84 @@ class ReviewResult(BaseModel):
 class ReplanIn(BaseModel):
     from_day: str | None = None
     strategy: str = Field(default='distribuir', pattern='^(distribuir|priorizar|revisar)$')
+
+class PromptOptions(BaseModel):
+    weekly_hours: int = Field(default=20, ge=1, le=84)
+    buffer_pct: int = Field(default=10, ge=0, le=50)
+    study_days: list[int] = Field(default_factory=lambda: [0,1,2,3,4,5])
+    strategy: str = Field(default='equilibrado', pattern='^(equilibrado|proxima|desempenho|pesos)$')
+    distribution_mode: str = Field(default='balanceada', pattern='^(balanceada|prioridade|ciclo)$')
+    sequence_mode: str = Field(default='intercalada', pattern='^(intercalada|sequencial)$')
+    subjects_per_day: int = Field(default=2, ge=1, le=7)
+    fixed_subjects: list[str] = Field(default_factory=list)
+    priority_subjects: list[str] = Field(default_factory=list)
+    theory_pct: int = Field(default=45, ge=0, le=100)
+    questions_pct: int = Field(default=30, ge=0, le=100)
+    review_pct: int = Field(default=25, ge=0, le=100)
+    include_simulados: bool = True
+    max_session_minutes: int = Field(default=90, ge=15, le=240)
+    custom_instructions: str = Field(default='', max_length=3000)
+
+class ImportPreferences(BaseModel):
+    weekly_hours: int = Field(default=20, ge=1, le=84)
+    buffer_pct: int = Field(default=10, ge=0, le=50)
+    subjects_per_day: int = Field(default=2, ge=1, le=7)
+    sequence_mode: str = Field(default='intercalada', pattern='^(intercalada|sequencial)$')
+    distribution_mode: str = Field(default='preservar', pattern='^(preservar|balancear|prioridade)$')
+    fixed_subjects: list[str] = Field(default_factory=list)
+    priority_overrides: dict[str, int] = Field(default_factory=dict)
+
+def normalize_preference_list(values):
+    return [squeeze(x) for x in (values or []) if squeeze(x)]
+
+def apply_import_preferences(plan, raw_preferences):
+    if not raw_preferences:
+        return plan
+    prefs=ImportPreferences.model_validate(raw_preferences).model_dump()
+    out=copy.deepcopy(plan)
+    schedule=out['schedule']
+    if not schedule:
+        return out
+    priorities={norm(k):int(v) for k,v in prefs['priority_overrides'].items() if str(v).isdigit()}
+    fixed={norm(x) for x in normalize_preference_list(prefs['fixed_subjects'])}
+    dates=sorted({x['date'] for x in schedule})
+    def score(item):
+        return priorities.get(norm(item['subject']), 3)
+    groups=defaultdict(list)
+    for item in schedule:
+        groups[norm(item['subject'])].append(item)
+    ordered_groups=sorted(groups.items(), key=lambda pair:(-priorities.get(pair[0],3), pair[0]))
+    if prefs['distribution_mode'] in ('balancear','prioridade') or prefs['sequence_mode']=='sequencial':
+        reordered=[]
+        if prefs['sequence_mode']=='sequencial':
+            for _,items in ordered_groups:
+                reordered.extend(items)
+        else:
+            for index in range(max(len(items) for _,items in ordered_groups)):
+                for _,items in ordered_groups:
+                    if index<len(items): reordered.append(items[index])
+        # Reassign only the date, retaining each session's content, duration and time.
+        for index,item in enumerate(reordered):
+            item['date']=dates[index % len(dates)]
+        schedule=reordered
+    # Fixed subjects are placed first on each day, making their daily contact predictable
+    # without duplicating or deleting sessions from the NotebookLM plan.
+    schedule.sort(key=lambda item:(item['date'], 0 if norm(item['subject']) in fixed else 1,
+                                   -score(item), item.get('start_time') or '99:99'))
+    out['schedule']=schedule
+    out['warnings']=list(out.get('warnings',[]))
+    weekly=defaultdict(int)
+    for item in schedule:
+        monday=date.fromisoformat(item['date'])-timedelta(days=date.fromisoformat(item['date']).weekday())
+        weekly[monday.isoformat()]+=int(item['minutes'])
+    ceiling=prefs['weekly_hours']*60*(1-prefs['buffer_pct']/100)
+    if any(minutes>ceiling for minutes in weekly.values()):
+        out['warnings'].append(f"A distribuição selecionada excede a capacidade efetiva de {ceiling/60:.1f}h em pelo menos uma semana; revise a prévia antes de confirmar.")
+    if prefs['distribution_mode']!='preservar' or fixed or prefs['priority_overrides']:
+        out['warnings'].append('Preferências locais de distribuição aplicadas na prévia: '+
+                               f"{prefs['subjects_per_day']} matéria(s) por dia, modo {prefs['distribution_mode']}, sequência {prefs['sequence_mode']}.")
+    out['_preferences']=prefs
+    return out
 
 def settings(c):
     return {r['key']:j(r['value']) for r in c.execute('SELECT * FROM settings')}
@@ -849,7 +928,7 @@ async def import_questions(file:UploadFile=File(...)):
     except Exception as e:raise HTTPException(422,f'CSV inválido: {e}')
     required={'subject_id','statement','option_a','option_b','option_c','option_d','answer','source'}
     if not rows or not required<=set(rows[0]): raise HTTPException(422,'Cabeçalhos obrigatórios: '+', '.join(sorted(required)))
-    
+
     with db() as c: subjects={r['id'] for r in c.execute('SELECT id FROM subjects')}
     good=[];errors=[]
     for i,r in enumerate(rows[:5000],2):
@@ -1160,7 +1239,7 @@ def normalize_notebook_plan(data):
                  'total_minutes':total_minutes,'qconcursos_sessions':sum(1 for s in clean_schedule if s['qconcursos_filters']['enabled'])}}
 
 
-def build_notebooklm_prompt():
+def build_notebooklm_prompt(options=None):
     with db() as c:
         st=settings(c)
         current_exams=[{'name':r['name'],'institution':r['institution'],'cargo':r['cargo'],'banca':r['banca'],'exam_date':r['exam_date'],
@@ -1168,16 +1247,31 @@ def build_notebooklm_prompt():
                         JOIN subjects sj ON sj.id=es.subject_id WHERE es.exam_id=?''',(r['id'],))]}
                        for r in c.execute('SELECT * FROM exams WHERE active=1 ORDER BY priority DESC, exam_date ASC')]
     weekdays=['segunda-feira','terça-feira','quarta-feira','quinta-feira','sexta-feira','sábado','domingo']
-    selected=[weekdays[i] for i in st.get('study_days',[]) if isinstance(i,int) and 0<=i<=6]
-    profile={'data_atual':iso(local_today()),'horas_semanais':st.get('weekly_hours',20),'dias_disponiveis':selected,
-             'margem_imprevistos_percentual':st.get('buffer_pct',10),'incluir_revisoes':bool(st.get('auto_review',True)),
-             'estrategia':st.get('strategy','equilibrado'),'fuso':'America/Sao_Paulo'}
-    return f'''PROMPT OFICIAL — EDITALOS / NOTEBOOKLM\n\nPAPEL\nVocê é um planejador experiente de concursos públicos brasileiros. Analise exclusivamente os editais e documentos adicionados como fontes neste NotebookLM. Produza um planejamento executável, realista, detalhado por dia, matéria e tópico. Não invente informações de edital nem datas.\n\nPERFIL DO ESTUDANTE (configuração atual do EditalOS)\n{json.dumps(profile,ensure_ascii=False,indent=2)}\n\nCONCURSOS JÁ CADASTRADOS NO EDITALOS (considere para evitar duplicação e identificar matérias comuns; não recrie concursos que não estejam nas fontes deste notebook, salvo se o usuário pedir):\n{json.dumps(current_exams,ensure_ascii=False,indent=2)}\n\nOBJETIVO\n1. Identifique cada concurso, órgão/instituição, banca, cargo, datas confirmadas e conteúdo programático. Diferencie dados expressos no edital de dados ausentes.\n2. Se houver mais de um edital/cargo, consolide as matérias comuns sem perder a vinculação dos tópicos aos concursos e cargos corretos.\n3. A data de referência de hoje é {profile['data_atual']}. Planeje a partir do próximo dia disponível, até a prova mais próxima. Se não houver data de prova confirmada, proponha um ciclo de 8 semanas e sinalize que é provisório. Use o fuso America/Sao_Paulo.\n4. Respeite o limite de {profile['horas_semanais']} horas semanais e distribua os estudos preferencialmente em: {', '.join(selected) if selected else 'dias a definir pelo usuário'}. Não crie carga incompatível com essa disponibilidade. Reserve a margem de {profile['margem_imprevistos_percentual']}% para revisão/ajustes e imprevistos.\n5. Priorize conforme proximidade da prova, peso/número de questões e conteúdo ainda não estudado, mas distribua as matérias para manter retenção e contato recorrente. Inclua teoria, leitura de lei quando pertinente, questões, revisão espaçada e simulados. {('Inclua revisões espaçadas automaticamente.' if profile['incluir_revisoes'] else 'Não acrescente revisão espaçada automática, mas mantenha as revisões obrigatórias exigidas pela sua estratégia.')}\n6. Para sessões de questões, use o QConcursos apenas como destino externo de prática: indique filtros de busca (disciplina, assunto, banca, instituição, período/ano, dificuldade e quantidade). NÃO copie questões, enunciados, alternativas, comentários ou gabaritos proprietários do QConcursos.\n7. Para cada sessão, informe data ISO (AAAA-MM-DD), horário se for relevante, duração em minutos, matéria, tópico específico, tipo de atividade e objetivo mensurável. Evite descrições genéricas como apenas “estudar Direito Administrativo”.\n8. Inclua inscrição, pedido de isenção, pagamento, prova, recursos, resultados e demais datas relevantes como eventos de calendário apenas quando comprovadas nas fontes. Para datas não encontradas, use null ou omita; nunca estime datas oficiais.\n9. Inclua referência à fonte e página para cada matéria/tópico/sessão sempre que disponível, por exemplo “Edital de abertura, p. 32”. Se a página não puder ser identificada, use string vazia.\n10. Faça uma revisão de consistência antes de entregar: datas válidas, cargas compatíveis, cada exam_ref existente, matérias realmente previstas no edital, sem sessões duplicadas na mesma faixa horária.\n\nFORMATO DE ENTREGA OBRIGATÓRIO\nDevolva UM ÚNICO ARQUIVO JSON chamado editalos_plano.json, com o objeto abaixo. Não entregue PDF ou texto corrido como arquivo principal. O EditalOS importa JSON estruturado. Se a opção de baixar JSON não estiver disponível, mostre o JSON completo na conversa, sem comentários antes/depois, para que o usuário copie para um arquivo de texto e salve com a extensão .json. Não envolva o conteúdo em explicações.\n\nESQUEMA OBRIGATÓRIO (preserve os nomes das propriedades):\n{{\n  "schema": "editalos.notebooklm.v1",\n  "metadata": {{ "title": "Plano ...", "generated_at": "AAAA-MM-DD", "sources": [{{"name":"arquivo do edital", "reference":"páginas/fontes utilizadas"}}] }},\n  "planning_period": {{"start_date":"AAAA-MM-DD", "end_date":"AAAA-MM-DD"}},\n  "exams": [{{\n    "ref":"concurso_1", "name":"Nome do concurso", "institution":"Órgão", "banca":"Banca", "cargo":"Cargo",\n    "priority":3, "exam_date":null, "registration_start":null, "registration_end":null,\n    "exemption_start":null, "exemption_end":null,\n    "subjects":[{{"name":"Direito Constitucional", "weight":1, "questions":0, "topics":["Tema 1", "Tema 2"]}}]\n  }}],\n  "schedule": [{{\n    "date":"AAAA-MM-DD", "start_time":"08:00", "minutes":50, "exam_ref":"concurso_1",\n    "subject":"Direito Constitucional", "topic":"Direitos e garantias fundamentais",\n    "activity_type":"teoria", "objective":"Ler o tópico e produzir resumo de 5 linhas",\n    "qconcursos":{{"enabled":false,"subject":"Direito Constitucional","topic":"Direitos e garantias fundamentais",\n      "bank":"","institution":"","year_from":2020,"year_to":{profile['data_atual'][:4]},"difficulty":"média",\n      "mode":"múltipla escolha","quantity":0,"filter_notes":""}},\n    "source_reference":"Edital, p. 22"\n  }}],\n  "events": [{{"title":"Período de inscrição", "type":"inscricao", "start_date":"AAAA-MM-DD",\n    "end_date":"AAAA-MM-DD", "exam_ref":"concurso_1", "notes":"", "source_reference":"Edital, p. 1"}}]\n}}\n\nVALORES PERMITIDOS\n- priority: 1 (secundário), 2 (importante), 3 (prioritário).\n- activity_type: teoria, questoes, revisao, simulado, lei_seca, resumo, redacao ou outro.\n- events.type: inscricao, isencao, prova, pagamento, recurso, resultado, convocacao, taf ou outro.\n- Para datas oficiais não encontradas, use null. Para exam_ref use exatamente o ref do concurso correspondente.\n- Para sessões de questões, qconcursos.enabled=true e quantity deve indicar a meta de questões. Para as demais, enabled=false.\n- Não adicione chaves extras; não use comentários JSON; não use trailing commas.\n\nIMPORTANTE: o EditalOS apenas valida o arquivo e coloca os blocos no calendário. Ele não executa IA, não acessa o NotebookLM e não busca nem copia questões do QConcursos.''' 
+    chosen=PromptOptions.model_validate(options or {'weekly_hours':st.get('weekly_hours',20),'buffer_pct':st.get('buffer_pct',10),
+        'study_days':st.get('study_days',[0,1,2,3,4,5]),'strategy':st.get('strategy','equilibrado'),
+        'review_pct':25 if st.get('auto_review',True) else 0}).model_dump()
+    selected=[weekdays[i] for i in chosen['study_days'] if isinstance(i,int) and 0<=i<=6]
+    profile={'data_atual':iso(local_today()),'horas_semanais':chosen['weekly_hours'],'dias_disponiveis':selected,
+             'margem_imprevistos_percentual':chosen['buffer_pct'],'estrategia':chosen['strategy'],'fuso':'America/Sao_Paulo',
+             'incluir_revisoes':chosen['review_pct']>0,
+             'modo_distribuicao':chosen['distribution_mode'],'sequencia':chosen['sequence_mode'],
+             'materias_por_dia':chosen['subjects_per_day'],'materias_todos_os_dias':chosen['fixed_subjects'],
+             'materias_prioritarias':chosen['priority_subjects'],'duracao_maxima_bloco_minutos':chosen['max_session_minutes'],
+             'proporcoes':{'teoria':chosen['theory_pct'],'questoes':chosen['questions_pct'],'revisao':chosen['review_pct']},
+             'incluir_simulados':chosen['include_simulados']}
+    priority_text=', '.join(chosen['priority_subjects']) or 'Nenhuma preferência nominal; use peso e proximidade da prova.'
+    fixed_text=', '.join(chosen['fixed_subjects']) or 'Nenhuma matéria fixa.'
+    custom=chosen['custom_instructions'].strip() or 'Nenhuma instrução adicional.'
+    return f'''PROMPT OFICIAL — EDITALOS / NOTEBOOKLM\n\nPAPEL\nVocê é um planejador experiente de concursos públicos brasileiros. Analise exclusivamente os editais e documentos adicionados como fontes neste NotebookLM. Produza um planejamento executável, realista, detalhado por dia, matéria e tópico. Não invente informações de edital nem datas.\n\nPERFIL DO ESTUDANTE (configuração atual do EditalOS)\n{json.dumps(profile,ensure_ascii=False,indent=2)}\n\nCONTROLES EXPLÍCITOS\n- Matérias prioritárias: {priority_text}\n- Matérias para contato diário, quando houver sessões suficientes: {fixed_text}\n- Use aproximadamente {chosen['subjects_per_day']} matéria(s) por dia.\n- Sequência {chosen['sequence_mode']}: {'termine um bloco antes de alternar.' if chosen['sequence_mode']=='sequencial' else 'intercale matérias para contato recorrente.'}\n- Proporções aproximadas: teoria {chosen['theory_pct']}%, questões {chosen['questions_pct']}%, revisão {chosen['review_pct']}%.\n- Cada bloco deve ter no máximo {chosen['max_session_minutes']} minutos, salvo simulado necessário.\n- Instruções adicionais: {custom}\n\nCONCURSOS JÁ CADASTRADOS NO EDITALOS (considere para evitar duplicação e identificar matérias comuns; não recrie concursos que não estejam nas fontes deste notebook, salvo se o usuário pedir):\n{json.dumps(current_exams,ensure_ascii=False,indent=2)}\n\nOBJETIVO\n1. Identifique cada concurso, órgão/instituição, banca, cargo, datas confirmadas e conteúdo programático. Diferencie dados expressos no edital de dados ausentes.\n2. Se houver mais de um edital/cargo, consolide as matérias comuns sem perder a vinculação dos tópicos aos concursos e cargos corretos.\n3. A data de referência de hoje é {profile['data_atual']}. Planeje a partir do próximo dia disponível, até a prova mais próxima. Se não houver data de prova confirmada, proponha um ciclo de 8 semanas e sinalize que é provisório. Use o fuso America/Sao_Paulo.\n4. Respeite o limite de {profile['horas_semanais']} horas semanais e distribua os estudos preferencialmente em: {', '.join(selected) if selected else 'dias a definir pelo usuário'}. Não crie carga incompatível com essa disponibilidade. Reserve a margem de {profile['margem_imprevistos_percentual']}% para revisão/ajustes e imprevistos.\n5. Priorize conforme proximidade da prova, peso/número de questões e conteúdo ainda não estudado, mas distribua as matérias para manter retenção e contato recorrente. Inclua teoria, leitura de lei quando pertinente, questões, revisão espaçada e simulados. {('Inclua revisões espaçadas automaticamente.' if profile['incluir_revisoes'] else 'Não acrescente revisão espaçada automática, mas mantenha as revisões obrigatórias exigidas pela sua estratégia.')}\n6. Para sessões de questões, use o QConcursos apenas como destino externo de prática: indique filtros de busca (disciplina, assunto, banca, instituição, período/ano, dificuldade e quantidade). NÃO copie questões, enunciados, alternativas, comentários ou gabaritos proprietários do QConcursos.\n7. Para cada sessão, informe data ISO (AAAA-MM-DD), horário se for relevante, duração em minutos, matéria, tópico específico, tipo de atividade e objetivo mensurável. Evite descrições genéricas como apenas “estudar Direito Administrativo”.\n8. Inclua inscrição, pedido de isenção, pagamento, prova, recursos, resultados e demais datas relevantes como eventos de calendário apenas quando comprovadas nas fontes. Para datas não encontradas, use null ou omita; nunca estime datas oficiais.\n9. Inclua referência à fonte e página para cada matéria/tópico/sessão sempre que disponível, por exemplo “Edital de abertura, p. 32”. Se a página não puder ser identificada, use string vazia.\n10. Faça uma revisão de consistência antes de entregar: datas válidas, cargas compatíveis, cada exam_ref existente, matérias realmente previstas no edital, sem sessões duplicadas na mesma faixa horária.\n\nFORMATO DE ENTREGA OBRIGATÓRIO\nDevolva UM ÚNICO ARQUIVO JSON chamado editalos_plano.json, com o objeto abaixo. Não entregue PDF ou texto corrido como arquivo principal. O EditalOS importa JSON estruturado. Se a opção de baixar JSON não estiver disponível, mostre o JSON completo na conversa, sem comentários antes/depois, para que o usuário copie para um arquivo de texto e salve com a extensão .json. Não envolva o conteúdo em explicações.\n\nESQUEMA OBRIGATÓRIO (preserve os nomes das propriedades):\n{{\n  "schema": "editalos.notebooklm.v1",\n  "metadata": {{ "title": "Plano ...", "generated_at": "AAAA-MM-DD", "sources": [{{"name":"arquivo do edital", "reference":"páginas/fontes utilizadas"}}] }},\n  "planning_period": {{"start_date":"AAAA-MM-DD", "end_date":"AAAA-MM-DD"}},\n  "exams": [{{\n    "ref":"concurso_1", "name":"Nome do concurso", "institution":"Órgão", "banca":"Banca", "cargo":"Cargo",\n    "priority":3, "exam_date":null, "registration_start":null, "registration_end":null,\n    "exemption_start":null, "exemption_end":null,\n    "subjects":[{{"name":"Direito Constitucional", "weight":1, "questions":0, "topics":["Tema 1", "Tema 2"]}}]\n  }}],\n  "schedule": [{{\n    "date":"AAAA-MM-DD", "start_time":"08:00", "minutes":50, "exam_ref":"concurso_1",\n    "subject":"Direito Constitucional", "topic":"Direitos e garantias fundamentais",\n    "activity_type":"teoria", "objective":"Ler o tópico e produzir resumo de 5 linhas",\n    "qconcursos":{{"enabled":false,"subject":"Direito Constitucional","topic":"Direitos e garantias fundamentais",\n      "bank":"","institution":"","year_from":2020,"year_to":{profile['data_atual'][:4]},"difficulty":"média",\n      "mode":"múltipla escolha","quantity":0,"filter_notes":""}},\n    "source_reference":"Edital, p. 22"\n  }}],\n  "events": [{{"title":"Período de inscrição", "type":"inscricao", "start_date":"AAAA-MM-DD",\n    "end_date":"AAAA-MM-DD", "exam_ref":"concurso_1", "notes":"", "source_reference":"Edital, p. 1"}}]\n}}\n\nVALORES PERMITIDOS\n- priority: 1 (secundário), 2 (importante), 3 (prioritário).\n- activity_type: teoria, questoes, revisao, simulado, lei_seca, resumo, redacao ou outro.\n- events.type: inscricao, isencao, prova, pagamento, recurso, resultado, convocacao, taf ou outro.\n- Para datas oficiais não encontradas, use null. Para exam_ref use exatamente o ref do concurso correspondente.\n- Para sessões de questões, qconcursos.enabled=true e quantity deve indicar a meta de questões. Para as demais, enabled=false.\n- Não adicione chaves extras; não use comentários JSON; não use trailing commas.\n\nIMPORTANTE: o EditalOS apenas valida o arquivo e coloca os blocos no calendário. Ele não executa IA, não acessa o NotebookLM e não busca nem copia questões do QConcursos.'''
 
 
 @app.get('/api/notebooklm/prompt')
 def notebooklm_prompt():
     return PlainTextResponse(build_notebooklm_prompt(),media_type='text/plain; charset=utf-8')
+
+@app.post('/api/notebooklm/prompt')
+def notebooklm_prompt_custom(options:PromptOptions):
+    return PlainTextResponse(build_notebooklm_prompt(options.model_dump()),media_type='text/plain; charset=utf-8')
 
 
 @app.get('/api/notebooklm/template')
@@ -1262,7 +1356,12 @@ def notebooklm_confirm(payload:dict):
     if mode not in ('append','replace_notebooklm'):
         raise HTTPException(422,'Modo de importação inválido.')
     pending=consume_preview(token)
-    plan=pending['plan']; batch_id=uuid.uuid4().hex
+    raw_preferences=payload.get('preferences') or {}
+    try:
+        plan=apply_import_preferences(pending['plan'],raw_preferences)
+    except Exception as exc:
+        raise HTTPException(422,f'Preferências de distribuição inválidas: {exc}')
+    batch_id=uuid.uuid4().hex
     exam_ids={}
     with db() as c:
         # Prevent duplicates even if two previews were open concurrently.

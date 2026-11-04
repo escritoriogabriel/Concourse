@@ -129,6 +129,37 @@ class NotebookLMIntegrationTests(unittest.TestCase):
         self.assertEqual(template.status_code, 200)
         self.assertIn('application/json', template.headers['content-type'])
 
+    def test_custom_prompt_exposes_modular_preferences(self):
+        response = client.post('/api/notebooklm/prompt', json={
+            'weekly_hours': 30, 'buffer_pct': 5, 'study_days': [0, 2, 4],
+            'strategy': 'pesos', 'distribution_mode': 'prioridade',
+            'sequence_mode': 'sequencial', 'subjects_per_day': 1,
+            'fixed_subjects': ['portugues'], 'priority_subjects': ['Direito Constitucional'],
+            'theory_pct': 40, 'questions_pct': 40, 'review_pct': 20,
+            'include_simulados': False, 'max_session_minutes': 60,
+            'custom_instructions': 'Reservar sábado para simulado.',
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        for marker in ('30', 'prioridade', 'sequencial', 'Direito Constitucional', 'Reservar sábado'):
+            self.assertIn(marker, response.text)
+
+    def test_import_preferences_are_applied_and_saved_in_snapshot(self):
+        response = upload_plan(plan(title='Plano modular'))
+        self.assertEqual(response.status_code, 200, response.text)
+        imported = client.post('/api/notebooklm/confirm', json={
+            'token': response.json()['token'], 'mode': 'append',
+            'preferences': {
+                'weekly_hours': 10, 'buffer_pct': 0, 'subjects_per_day': 1,
+                'distribution_mode': 'balancear', 'sequence_mode': 'sequencial',
+                'fixed_subjects': ['Direito Administrativo'],
+                'priority_overrides': {'Direito Administrativo': 5},
+            },
+        })
+        self.assertEqual(imported.status_code, 200, imported.text)
+        with app_module.db() as conn:
+            snapshot = conn.execute('SELECT plan_json FROM notebooklm_imports ORDER BY created DESC LIMIT 1').fetchone()
+        self.assertEqual(snapshot['plan_json'] and 'balancear' in snapshot['plan_json'], True)
+
     def test_preview_confirm_and_qconcursos_filters(self):
         data = plan()
         preview = upload_plan(data)
